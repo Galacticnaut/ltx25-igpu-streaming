@@ -5,7 +5,9 @@
 import glob, json, os, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
+sys.path.insert(0, ROOT)
+from plat import venv_python
+PY = venv_python(ROOT)
 NAME, MODE = "emberfall", "flash"
 OUT = os.path.join(ROOT, "videos", "anime", NAME)
 OPENING = [os.path.join(ROOT, "videos", "anime", "ronin-entrance", "flash_1536x896_24fps_5.4s_seed77.mp4"),

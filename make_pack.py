@@ -1,7 +1,7 @@
 """Build ltx_igpu_pack.zip: everything a friend needs (no models, videos, latents or venv)."""
 import os, zipfile
 ROOT = os.path.dirname(os.path.abspath(__file__))
-FILES = ["setup_ltx.py", "render.py", "friend_probe.py", "README_FRIEND.md", "BIBLE.md"]
+FILES = ["setup_ltx.py", "render.py", "plat.py", "friend_probe.py", "README_FRIEND.md", "BIBLE.md"]
 STREAM = ["dev.py", "blockstream.py", "runtime.py", "run_ltx.py", "decode_big.py", "selftest.py", "stitch.py", "fix_audio.py", "transcribe.py"]
 out = os.path.join(ROOT, "ltx_igpu_pack.zip")
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:

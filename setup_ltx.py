@@ -1,7 +1,7 @@
 """One-command setup + self-test for running unquantized LTX-2.5 (22B) on this PC by streaming weights from disk.
 
   python setup_ltx.py                      # first run: asks where to put the 66 GB model, then does everything
-  python setup_ltx.py --model-dir D:\\ltx25  # choose the model folder up front
+  python setup_ltx.py --model-dir D:\\ltx25  # choose the model folder up front (macOS: e.g. ~/ltx25)
   python setup_ltx.py --skip-bench         # skip the final full-size benchmark render
   python setup_ltx.py --status             # show which stages are done, change nothing
 
@@ -19,7 +19,8 @@ LOG = os.path.join(ROOT, "setup_log.txt")
 STATE = os.path.join(ROOT, "setup_state.json")
 CONFIG = os.path.join(ROOT, "ltx_config.json")
 VENV = os.path.join(ROOT, ".venv")
-VPY = os.path.join(VENV, "Scripts", "python.exe")
+WIN, MAC = os.name == "nt", sys.platform == "darwin"
+VPY = os.path.join(VENV, "Scripts", "python.exe") if WIN else os.path.join(VENV, "bin", "python")
 REPO = "Lightricks/LTX-2.5-Diffusers"
 MODEL_URL = "https://huggingface.co/" + REPO
 TOKEN_URL = "https://huggingface.co/settings/tokens"
@@ -29,7 +30,7 @@ ALLOW = ["*.json", "*.txt", "*.model",
          "connectors/*-of-00002.safetensors", "connectors/*.index.json", "latent_upsampler/*"]
 IGNORE = ["transformer_full/*", "prompt_enhancer/*", "*lora*"]
 PINS = ["diffusers==0.40.0", "transformers==5.14.1", "accelerate==1.15.0", "safetensors==0.8.0"]
-FREE = ["huggingface_hub", "numpy", "pillow", "av", "imageio", "imageio-ffmpeg", "sentencepiece", "protobuf", "tqdm", "regex"]
+FREE = ["huggingface_hub", "numpy", "pillow", "av", "imageio", "imageio-ffmpeg", "sentencepiece", "protobuf", "tqdm", "regex", "psutil"]
 NEED_GB = 75          # 66 GB model + room for outputs
 
 # ------------------------------------------------------------------ logging (console + file, progress bars kept out of the file)
@@ -141,15 +142,18 @@ def models_dir():
 
 
 def v_preflight(ctx):
-    if os.name != "nt":
-        return False, "this version only supports Windows (it uses Windows unbuffered file reads)"
+    if not (WIN or MAC):
+        return False, "this version supports Windows and macOS (Apple Silicon) only"
+    if MAC and platform.machine() != "arm64":
+        return False, "on macOS an Apple Silicon (M-series) Mac is required: Intel Macs have no usable GPU backend"
     if sys.version_info < (3, 10):
         return False, f"Python {sys.version.split()[0]} is too old (need 3.10+)"
     if ctx.device == "cuda":
         smi = shutil.which("nvidia-smi")
         if not smi:
             return False, "nvidia-smi not found: install the NVIDIA driver (https://www.nvidia.com/Download/index.aspx)"
-    return True, f"Windows, Python {sys.version.split()[0]}"
+    osname = f"macOS {platform.mac_ver()[0]}" if MAC else "Windows"
+    return True, f"{osname}, Python {sys.version.split()[0]}"
 
 
 def r_preflight(ctx):
@@ -160,6 +164,15 @@ def r_preflight(ctx):
 
 
 def drives():
+    if not WIN:          # macOS: the system volume plus anything mounted under /Volumes
+        out = []
+        for d in ["/"] + sorted(os.path.join("/Volumes", v) for v in (os.listdir("/Volumes") if os.path.isdir("/Volumes") else [])):
+            try:
+                if os.path.ismount(d) and (d == "/" or not os.path.samefile(d, "/")):
+                    out.append((d, shutil.disk_usage(d).free / 2**30))
+            except OSError:
+                pass
+        return out
     out = []
     mask = ctypes.windll.kernel32.GetLogicalDrives()
     for i in range(26):
@@ -197,7 +210,10 @@ def r_folder(ctx):
         default = os.path.join(best[0], "ltx25") if best else os.path.join(ROOT, "models", "ltx25")
         path = ask(f"\n  Folder for the model [{default}]: ", default)
     path = os.path.abspath(path)
-    free = shutil.disk_usage(os.path.splitdrive(path)[0] + "\\" if os.path.splitdrive(path)[0] else ROOT).free / 2**30
+    probe = path
+    while not os.path.exists(probe):                     # nearest existing parent is on the same volume
+        probe = os.path.dirname(probe)
+    free = shutil.disk_usage(probe).free / 2**30
     have = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(path) for f in fs) / 2**30 if os.path.isdir(path) else 0
     if free + have < NEED_GB:
         raise Fail(f"only {free:.0f} GB free on that drive (+{have:.0f} GB already there); need about {NEED_GB} GB. Free some space or choose another drive: python setup_ltx.py --model-dir <folder>")
@@ -241,7 +257,7 @@ def cuda_tag():
 
 
 def v_torch(ctx):
-    code = ("import torch,sys;d=sys.argv[1];ok=torch.cuda.is_available() if d=='cuda' else torch.xpu.is_available();"
+    code = ("import torch,sys;d=sys.argv[1];ok={'cuda':torch.cuda.is_available,'mps':torch.backends.mps.is_available}.get(d,lambda:torch.xpu.is_available())();"
             "x=torch.randn(64,64,device=d)@torch.randn(64,64,device=d) if ok else None;"
             "print(torch.__version__, 'OK' if ok else 'NO-ACCELERATOR')")
     r = subprocess.run([VPY, "-c", code, ctx.device], capture_output=True, text=True)
@@ -250,6 +266,10 @@ def v_torch(ctx):
 
 
 def r_torch(ctx):
+    if ctx.device == "mps":
+        say("  installing PyTorch (Apple GPU / MPS support is built in); this is a ~100 MB download...")
+        retry(lambda: _pip(["torch"]), 3, "PyTorch install")
+        return
     if ctx.device != "cuda":
         raise Fail("PyTorch with an Intel XPU must be installed manually in .venv")
     tag = cuda_tag()
@@ -563,7 +583,7 @@ class Ctx:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir")
-    ap.add_argument("--device", default="cuda", choices=["cuda", "xpu"], help="(testing only) accelerator type")
+    ap.add_argument("--device", default="mps" if MAC else "cuda", choices=["cuda", "xpu", "mps"], help="(testing only) accelerator type")
     ap.add_argument("--skip-bench", action="store_true")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--in-venv", action="store_true", help=argparse.SUPPRESS)
@@ -617,7 +637,8 @@ def main():
         rep = write_report(ctx)
         banner("ALL DONE")
         say(f"  Everything is installed and verified. Please send me:\n    {rep}\n    {LOG}\n"
-            "  Make a video:   .venv\\Scripts\\python render.py --mode flash --name my-clip --prompt-file prompts\\anime_swordsman-bridge.txt --seed 1")
+            + ("  Make a video:   .venv\\Scripts\\python render.py --mode flash --name my-clip --prompt-file prompts\\anime_swordsman-bridge.txt --seed 1" if WIN else
+               "  Make a video:   .venv/bin/python render.py --mode flash --name my-clip --prompt-file prompts/anime_swordsman-bridge.txt --seed 1"))
 
 
 if __name__ == "__main__":

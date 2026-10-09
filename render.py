@@ -10,8 +10,9 @@ Latents: latents/<name>_<mode>_seed<N>.pt (+ .pt.stage1)      Log: logs/<name>_<
 import argparse, json, os, shutil, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-_V = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
-PY = _V if os.path.exists(_V) else sys.executable
+sys.path.insert(0, ROOT)
+from plat import venv_python
+PY = venv_python(ROOT)
 
 # W,H = stage-1 size; two-stage doubles it. s2 = refinement steps; fps = generation fps; repeat = frame duplication at export
 MODES = {

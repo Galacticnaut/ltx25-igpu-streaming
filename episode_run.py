@@ -4,10 +4,13 @@
 Rules: never restart a render that failed with a non-zero exit (stop and report); stop if the laptop is on battery below 40 %;
 max 3 attempts per shot; after that the best attempt is kept and the shot is flagged needs_director.
 """
-import argparse, ctypes, json, os, subprocess, sys, time
+import argparse, json, os, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
+sys.path.insert(0, ROOT)
+import plat
+from plat import venv_python
+PY = venv_python(ROOT)
 ap = argparse.ArgumentParser(); ap.add_argument("episode"); ap.add_argument("--from", dest="start", default="05A"); ap.add_argument("--until", default="12")
 a = ap.parse_args()
 EP = os.path.join(ROOT, "episodes", a.episode); SHOTS = os.path.join(EP, "shots.json"); RUNS = os.path.join(EP, "runs.json")
@@ -19,10 +22,8 @@ def log(*x): print(time.strftime("[%H:%M:%S]"), *x, flush=True)
 
 
 def power_ok():
-    class SPS(ctypes.Structure):
-        _fields_ = [("ac", ctypes.c_ubyte), ("flag", ctypes.c_ubyte), ("pct", ctypes.c_ubyte), ("r", ctypes.c_ubyte), ("life", ctypes.c_ulong), ("full", ctypes.c_ulong)]
-    s = SPS(); ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s))
-    return s.ac == 1 or s.pct >= 40 or s.pct == 255, s.ac, s.pct
+    on_ac, pct = plat.power()
+    return on_ac or pct >= 40 or pct == 255, int(on_ac), pct
 
 
 def wait_for_ac(sid):

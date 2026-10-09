@@ -8,7 +8,9 @@ import av
 from PIL import Image
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
+sys.path.insert(0, ROOT)
+from plat import venv_python
+PY = venv_python(ROOT)
 NAME, MODE = "lantern-keeper", "flash"
 OUT = os.path.join(ROOT, "videos", "anime", NAME)
 FR = os.path.join(ROOT, "frames", NAME)

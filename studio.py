@@ -1,6 +1,7 @@
 """LTX Studio - a very small Tk front-end for hand-guided generation (about 30-50 MB of RAM, no browser).
 
   .venv\\Scripts\\pythonw.exe studio.py        (or double-click start_studio.bat)
+  .venv/bin/python studio.py                 (macOS)
 
 Pick a start image (optional), write the prompt, tune the settings, press Start. It runs render.py in the background and shows a
 progress bar with time left, a live "what the model currently thinks the video will be" picture after every denoising step
@@ -13,8 +14,9 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-_V = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
-PY = _V if os.path.exists(_V) else sys.executable
+sys.path.insert(0, ROOT)
+import plat
+PY = plat.venv_python(ROOT)
 INPUTS = os.path.join(ROOT, "studio_inputs")
 RECIPE6 = "1.0,0.9875,0.975,0.909375,0.725,0.421875"
 PRESETS = {                       # size, fps, stage-1 steps, refinement steps
@@ -29,11 +31,7 @@ SIZES = ["384x256", "512x320", "640x352", "768x448", "800x448", "896x512", "960x
 
 
 # ----------------------------------------------------------------------------- helpers
-def free_ram_gb():
-    class MS(ctypes.Structure):
-        _fields_ = [("l", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [(n, ctypes.c_ulonglong) for n in ("tp", "ap", "tpf", "apf", "tv", "av", "ae")]
-    ms = MS(); ms.l = ctypes.sizeof(ms); ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
-    return ms.ap / 2**30
+free_ram_gb = plat.free_ram_gb
 
 
 def frames_for(seconds, fps):
@@ -197,7 +195,7 @@ class App:
         self.logbox = tk.Text(right, height=11, wrap="none", font=("Consolas", 8), state="disabled"); self.logbox.grid(row=6, column=0, sticky="nsew", pady=6)
         right.columnconfigure(0, weight=1); right.rowconfigure(6, weight=1)
         rb = ttk.Frame(right); rb.grid(row=7, sticky="ew")
-        self.play_btn = ttk.Button(rb, text="Play result", command=lambda: self.video and os.startfile(self.video), state="disabled"); self.play_btn.pack(side="left")
+        self.play_btn = ttk.Button(rb, text="Play result", command=lambda: self.video and plat.open_path(self.video), state="disabled"); self.play_btn.pack(side="left")
         ttk.Button(rb, text="Open output folder", command=self.open_folder).pack(side="left", padx=6)
         self.update_info(); self.tick()
 
@@ -270,22 +268,22 @@ class App:
         self.log_pos = 0; self.prev_files = []; self.follow = True; self.video = None
         self.logbox.config(state="normal"); self.logbox.delete("1.0", "end"); self.logbox.config(state="disabled")
         self.tracker = Tracker(self.est)
-        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=open(self.out_path, "w", encoding="utf-8"), stderr=subprocess.STDOUT, creationflags=0x08000000)
+        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=open(self.out_path, "w", encoding="utf-8"), stderr=subprocess.STDOUT, **plat.POPEN_KW)
         self.start_btn.config(state="disabled"); self.stop_btn.config(state="normal"); self.play_btn.config(state="disabled")
         self.status.config(text="Starting...")
 
     def stop(self):
         if self.proc and messagebox.askyesno("Stop", "Stop the generation? Progress of this clip is lost."):
-            subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"], capture_output=True)
+            plat.kill_tree(self.proc)
             self.status.config(text="Stopped by you")
 
     def open_folder(self):
-        d = os.path.join(ROOT, "videos", "studio"); os.makedirs(d, exist_ok=True); os.startfile(d)
+        d = os.path.join(ROOT, "videos", "studio"); os.makedirs(d, exist_ok=True); plat.open_path(d)
 
     # --- periodic update (cheap: reads only new log text, one small image)
     def tick(self):
         try:
-            self.ram.config(text=f"free RAM {free_ram_gb():.1f} GB")
+            ram = free_ram_gb(); self.ram.config(text=f"free RAM {ram:.1f} GB" if ram is not None else "")
             if self.proc: self.poll()
         finally:
             self.root.after(1000, self.tick)
@@ -322,8 +320,8 @@ class App:
             self.time_lbl.config(text=f"stopped after {total}")
         else:
             self.status.config(text="Failed")
-            self.time_lbl.config(text=f"failed after {total} (exit {rc}). See logs\\{self.tag}.log")
-            messagebox.showerror("Generation failed", (out[-900:] or "no output") + f"\n\nFull log: logs\\{self.tag}.log")
+            self.time_lbl.config(text=f"failed after {total} (exit {rc}). See {os.path.join('logs', self.tag + '.log')}")
+            messagebox.showerror("Generation failed", (out[-900:] or "no output") + f"\n\nFull log: {os.path.join('logs', self.tag + '.log')}")
 
     # --- live preview
     def load_previews(self):

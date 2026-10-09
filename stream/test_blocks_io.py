@@ -1,10 +1,11 @@
 """Step 1: I/O-only throughput on the REAL transformer blocks."""
+import os
 import sys
 import time
 
 import torch
 
-sys.path.insert(0, __file__.rsplit("\\", 1)[0])
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blockstream import BlockStreamer, Plan, ShardIndex
 
 idx = ShardIndex("models/ltx25/transformer")

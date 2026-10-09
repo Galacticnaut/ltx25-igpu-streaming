@@ -26,7 +26,7 @@ def timeit(fn, n=10):
 
 if what == "device":
     print(f"device: {NAME}  torch {torch.__version__}")
-    check("accelerator available", (torch.cuda.is_available() if NAME == "cuda" else torch.xpu.is_available()))
+    check("accelerator available", {"cuda": torch.cuda.is_available, "mps": torch.backends.mps.is_available}.get(NAME, lambda: torch.xpu.is_available())())
     a = torch.randn(4096, 4096, device=DEV, dtype=torch.bfloat16); b = torch.randn(4096, 4096, device=DEV, dtype=torch.bfloat16)
     c = a @ b; acc.synchronize()
     ref = (a.float().cpu() @ b.float().cpu())

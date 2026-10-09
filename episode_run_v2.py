@@ -3,14 +3,13 @@
   python episode_run_v2.py ye-chen-ep1-v2 30 28 09 12 14 06 18 26 25 19     # shot order = priority
 Skips shots whose status is not 'ready'; resumable (takes already rendered are skipped); waits for the charger; stops on a render error.
 """
-import ctypes, glob, json, os, subprocess, sys, time
-ROOT = os.path.dirname(os.path.abspath(__file__)); PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
-sys.path.insert(0, ROOT); import shot_qc
+import glob, json, os, subprocess, sys, time
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT); import shot_qc, plat
+PY = plat.venv_python(ROOT)
 ep = sys.argv[1]; order = sys.argv[2:]; EP = os.path.join(ROOT, "episodes", ep); SH = os.path.join(EP, "shots.json"); RUNS = os.path.join(EP, "runs.json")
 def log(*x): print(time.strftime("[%H:%M:%S]"), *x, flush=True)
-def ac():
-    class S(ctypes.Structure): _fields_ = [("ac", ctypes.c_ubyte), ("f", ctypes.c_ubyte), ("pct", ctypes.c_ubyte), ("r", ctypes.c_ubyte), ("l", ctypes.c_ulong), ("fu", ctypes.c_ulong)]
-    s = S(); ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s)); return s.ac == 1, s.pct
+def ac(): return plat.power()
 def wait_ac(tag):
     n = 0
     while True:
