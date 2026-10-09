@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import init_empty_weights
 
-from blockstream import BlockStreamer, DT, Plan, aligned_unpack, ShardIndex, _open_raw, _read_range, k32
+from blockstream import BlockStreamer, DT, Plan, aligned_unpack, ShardIndex, _close_raw, _open_raw, _read_range
 
 from dev import DEV, acc
 
@@ -213,7 +213,7 @@ class Streamed:
                 _read_range(h, a0 + off, n, stage.data_ptr())
                 g[off:off + n].copy_(stage[:n])
         finally:
-            k32.CloseHandle(h)
+            _close_raw(h)
         dst = torch.empty(nb, dtype=torch.uint8, device=DEV)  # fresh allocation = aligned
         dst.copy_(g[o:o + nb])
         del g
@@ -240,7 +240,7 @@ class Streamed:
             self.streamer = None
         else:
             for h in self.handles.values():
-                k32.CloseHandle(h)
+                _close_raw(h)
             self.handles = {}
             self.abuf = None
         self._orig = {}

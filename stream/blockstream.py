@@ -1,7 +1,8 @@
-"""Stream real safetensors blocks from NVMe -> pinned RAM -> iGPU, with prefetch.
+"""Stream real safetensors blocks from NVMe -> pinned RAM -> GPU, with prefetch.
 
 Index every tensor in a component's shards, group them by block prefix, and read each
 group's byte range with unbuffered I/O (page-cache bypass, real NVMe speed).
+Windows: CreateFileW(FILE_FLAG_NO_BUFFERING) + ReadFile. macOS/Linux: pread, with F_NOCACHE on macOS.
 """
 import ctypes
 import glob
@@ -11,46 +12,80 @@ import queue
 import re
 import struct
 import threading
-from ctypes import wintypes
 
 import torch
 
-from dev import NAME as _DEVNAME, acc
+from dev import HAS_STREAMS, NAME as _DEVNAME, acc
 
 ALIGN = 4096
+CHUNK = 64 << 20
 DT = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,
       "I64": torch.int64, "U8": torch.uint8, "F8_E4M3": torch.float8_e4m3fn}
 
-# ---- Windows unbuffered reads ----
-k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-k32.CreateFileW.restype = wintypes.HANDLE
-k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
-k32.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
-                         ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
-k32.SetFilePointerEx.argtypes = [wintypes.HANDLE, ctypes.c_longlong, ctypes.c_void_p, wintypes.DWORD]
-k32.CloseHandle.argtypes = [wintypes.HANDLE]
+if os.name == "nt":
+    # ---- Windows unbuffered reads ----
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k32.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    k32.SetFilePointerEx.argtypes = [wintypes.HANDLE, ctypes.c_longlong, ctypes.c_void_p, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
 
+    def _open_raw(path):
+        h = k32.CreateFileW(path, 0x80000000, 1, None, 3, 0x20000000, None)  # NO_BUFFERING
+        if h in (None, ctypes.c_void_p(-1).value):
+            raise OSError(ctypes.get_last_error(), path)
+        return h
 
-def _open_raw(path):
-    h = k32.CreateFileW(path, 0x80000000, 1, None, 3, 0x20000000, None)  # NO_BUFFERING
-    if h in (None, ctypes.c_void_p(-1).value):
-        raise OSError(ctypes.get_last_error(), path)
-    return h
+    def _read_range(h, start, nbytes, ptr):
+        """Read [start, start+nbytes) (both ALIGN-multiples) into raw pointer ptr."""
+        k32.SetFilePointerEx(h, start, None, 0)
+        got, left = wintypes.DWORD(), nbytes
+        while left:
+            n = min(left, CHUNK)
+            if not k32.ReadFile(h, ptr, n, ctypes.byref(got), None) or got.value == 0:
+                raise OSError(ctypes.get_last_error())
+            if got.value < n:  # EOF inside the final aligned chunk
+                return
+            ptr += got.value
+            left -= got.value
 
+    def _close_raw(h):
+        k32.CloseHandle(h)
+else:
+    # ---- POSIX reads: pread straight into the pinned buffer; F_NOCACHE (macOS) bypasses the unified buffer cache ----
+    import fcntl
+    _libc = ctypes.CDLL(None, use_errno=True)
+    _libc.pread.restype = ctypes.c_ssize_t
+    _libc.pread.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]
+    _F_NOCACHE = getattr(fcntl, "F_NOCACHE", 48) if os.uname().sysname == "Darwin" else None
+    NOCACHE = os.environ.get("LTX_NOCACHE", "1") == "1"   # 0 = let the OS cache shards (may help on big-RAM Macs)
 
-def _read_range(h, start, nbytes, ptr):
-    """Read [start, start+nbytes) (both ALIGN-multiples) into raw pointer ptr."""
-    k32.SetFilePointerEx(h, start, None, 0)
-    got, left = wintypes.DWORD(), nbytes
-    while left:
-        n = min(left, 64 << 20)
-        if not k32.ReadFile(h, ptr, n, ctypes.byref(got), None) or got.value == 0:
-            raise OSError(ctypes.get_last_error())
-        if got.value < n:  # EOF inside the final aligned chunk
-            return
-        ptr += got.value
-        left -= got.value
+    def _open_raw(path):
+        fd = os.open(path, os.O_RDONLY)
+        if NOCACHE and _F_NOCACHE is not None:
+            fcntl.fcntl(fd, _F_NOCACHE, 1)
+        return fd
+
+    def _read_range(fd, start, nbytes, ptr):
+        """Read [start, start+nbytes) into raw pointer ptr; stops early at EOF (final aligned chunk)."""
+        left = nbytes
+        while left:
+            n = _libc.pread(fd, ptr, min(left, CHUNK), start)
+            if n < 0:
+                e = ctypes.get_errno()
+                raise OSError(e, os.strerror(e))
+            if n == 0:  # EOF
+                return
+            ptr += n
+            start += n
+            left -= n
+
+    def _close_raw(fd):
+        os.close(fd)
 
 
 class TensorInfo:
@@ -171,22 +206,25 @@ class BlockStreamer:
                     for f, a0, ln, boff in plan.reads:
                         h = handles.get(f) or handles.setdefault(f, _open_raw(f))
                         _read_range(h, a0, ln, host.data_ptr() + boff)
-                    with acc.stream(self.stream):
-                        self.gbufs[s][:plan.nbytes].copy_(host[:plan.nbytes], non_blocking=True)
-                    self.stream.synchronize()
+                    if HAS_STREAMS:
+                        with acc.stream(self.stream):
+                            self.gbufs[s][:plan.nbytes].copy_(host[:plan.nbytes], non_blocking=True)
+                        self.stream.synchronize()
                     self.bytes_read += plan.nbytes
                     self.ready.put((s, plan))
         except Exception as e:  # surface loader errors to the consumer
             self.ready.put((None, e))
         finally:
             for h in handles.values():
-                k32.CloseHandle(h)
+                _close_raw(h)
 
     def next(self):
         """-> (slot, {name: gpu_tensor}). Call release(slot) when the block is no longer needed."""
         s, plan = self.ready.get()
         if s is None:
             raise plan
+        if not HAS_STREAMS:  # MPS: no side stream, and MPS is not safe to drive from the loader thread
+            self.gbufs[s][:plan.nbytes].copy_(self.hosts[s][:plan.nbytes])
         return s, aligned_unpack(self.gbufs[s], plan, self.abuf)
 
     def release(self, slot):
