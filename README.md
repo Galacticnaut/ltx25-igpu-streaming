@@ -67,7 +67,7 @@ The same streaming engine runs on Macs through PyTorch's MPS backend (no CUDA, n
 - On MPS, stage 1 and stage 2 prefetch weights whenever free RAM allows (`SYNC_S1` / `SYNC_S2` = 1 or 0 override); output is bit-identical.
 - **Sustained GPU speed varies a lot on this machine:** bf16 matmuls burst at ~15 TFLOPS, then settle at 2.6-7 TFLOPS under minutes of load (87 W charger,
   High Power mode made no difference). A cooler Mac or a 96 W+ charger may be faster; the cause was not pinned down (needs `sudo powermetrics`).
-- Port details: MPS has no float64, so LTX-2 RoPE tables are computed on the CPU (bit-identical); weights are read with `pread` + `F_NOCACHE`;
+- Port details: MPS has no float64, so LTX-2 RoPE tables are computed on the CPU (bit-identical); weights are read with `pread` + `F_NOCACHE` (allowing the OS page cache was 36 % slower: a pass is bigger than free RAM);
   MPS has no side streams, so the prefetch thread only reads and the GPU copy happens on the main thread. See [BIBLE.md](BIBLE.md) section 15.
 - Checks: 48 real blocks on MPS bf16 vs a CPU fp32 replay end within 4.1 % (video) / 1.3 % (audio); loader byte-identical; audio VAE + vocoder in fp32 match CPU.
 

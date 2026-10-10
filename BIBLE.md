@@ -417,3 +417,7 @@ firmware GPU power limit. Next step: `sudo powermetrics --samplers gpu_power,the
 - REFERENCE at 1080p (960x544 -> 1920x1088, 121 frames at 24 fps, 3 refinement steps, swordsman-bridge seed 7): **18.7 min** (stage 1 326 s,
   stage 2 678 s = 214-232 s/step, decode ~100 s), before this change (stage 1 still sync). Motion check: median frame change 14.0, 0/117 frames
   > 38, vs FLASH 17.5 and 14/64 smeared; audio present. The README's swordsman-bridge GIF is the REFERENCE render (5.0 s), not FLASH.
+- **Page-cache A/B (`LTX_NOCACHE`), keep the default `1` (F_NOCACHE):** `bench/io_cache_ab.py` (48 blocks x 3 passes, no compute): 6.0-6.1 GiB/s
+  every pass in both modes. A pass (34.6 GiB) is larger than free RAM (~27 GiB), so a sequential scan evicts each block before it is needed
+  again: no cache hits, ~3 GB less free RAM. Smoke render (I/O-bound): 4.1 s/step and 33.2 s with F_NOCACHE vs 5.7 s/step and 45.3 s (+36 %)
+  with the cache. Only a machine with free RAM well above the per-pass size could gain; not the case on 64 GB.
