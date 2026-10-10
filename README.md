@@ -57,10 +57,14 @@ The same streaming engine runs on Macs through PyTorch's MPS backend (no CUDA, n
 
 | Result | Mac (M4 Max) | iGPU (above) |
 |---|---|---|
-| FLASH: anime 5.4 s, 1536x896 + audio | **6.4-6.7 min** | ~14 min |
+| FLASH: anime 5.4 s, 1536x896 + audio | **3.9 min** (6.4-6.7 min while the GPU was throttling) | ~14 min |
+| REFERENCE at 1080p: 5 s, 1920x1088, true 24 fps, 3 refinement steps | **18.7 min** | 47 min (at 1536x896) |
 | Smoke test, 384x256, 1.4 s | 0.8 min | - |
 | One transformer pass, 3k tokens | 9.2 s (cool) - ~21 s (sustained) | ~47 s |
 
+- **Fast action: use REFERENCE, not FLASH.** On swordsman-bridge FLASH smeared 14 of 64 distinct frames; REFERENCE at 1080p 0 of 117
+  (`render.py --mode reference --w 960 --h 544 --seconds 5.0 ...`).
+- On MPS, stage 1 and stage 2 prefetch weights whenever free RAM allows (`SYNC_S1` / `SYNC_S2` = 1 or 0 override); output is bit-identical.
 - **Sustained GPU speed varies a lot on this machine:** bf16 matmuls burst at ~15 TFLOPS, then settle at 2.6-7 TFLOPS under minutes of load (87 W charger,
   High Power mode made no difference). A cooler Mac or a 96 W+ charger may be faster; the cause was not pinned down (needs `sudo powermetrics`).
 - Port details: MPS has no float64, so LTX-2 RoPE tables are computed on the CPU (bit-identical); weights are read with `pread` + `F_NOCACHE`;

@@ -403,3 +403,17 @@ firmware GPU power limit. Next step: `sudo powermetrics --samplers gpu_power,the
 | B29 | probe VAE gave 992x1728 instead of 896x1536 and a 7x12 latent for 448x768 (also on CPU) | default `AutoencoderKLLTX2Video()` config leaves the compression ratios unset, tiling then scales tiles wrongly | pass `spatial_compression_ratio=32, temporal_compression_ratio=8` in probes; the real checkpoint config sets them |
 | B30 | first smoke render: `PyAV is required to use encode_video` at decode | venv built by hand without setup's dependency list | install the full `FREE` list (`setup_ltx.py` does this itself) |
 | B31 | Hugging Face token "not found" though exported | token was in `HUGGING_FACE_TOKEN`; huggingface_hub only reads `HF_TOKEN`. Also: listing files worked but downloads 403'd until the license was accepted for that account | `HF_TOKEN="$HUGGING_FACE_TOKEN"`; accept the license on the model page first (cf. B02) |
+
+### 15b. Memory-aware streaming on MPS, new benchmarks (2026-10-10)
+- `run_ltx.use_sync()`: stage 1 and stage 2 choose prefetch vs synchronous streaming. On MPS: prefetch if free RAM >= 3 GB (prefetch slots)
+  + 2.5 GB + 0.2 GiB per 1k tokens (measured activations) + 4 GB margin; on CUDA/XPU the original fixed rules are kept (stage 1 sync above
+  900x448x65, stage 2 always sync, B14). `SYNC_S1` / `SYNC_S2` = "1"/"0" force a mode; the decision is logged. The size rule moved from
+  `render.py` into `run_ltx.py`.
+- A/B on the same stage-1 latents (FLASH stage 2, 12k tokens): sync 46.2 s, prefetch 44.9 s (-3 %); decoded videos bit-identical.
+  Gain is larger where I/O is a bigger share (1080p stage 1 was sync: ~4-5 s of each 31-55 s step was un-overlapped reads; not re-measured).
+- **The machine state dominates:** stage 2 took 46 s when started on a rested GPU vs 124-129 s at the end of a full render; after High Power
+  mode + restarting the runaway Siri AI + quitting Docker Desktop, FLASH stage 1 dropped from 20.5-22.6 to 12.7-18.8 s/step (that code path
+  did not change). FLASH total: **3.9 min** (stage 1 114 s, stage 2 64 s), vs 6.4-6.7 min before. Which of the three changes mattered was not isolated.
+- REFERENCE at 1080p (960x544 -> 1920x1088, 121 frames at 24 fps, 3 refinement steps, swordsman-bridge seed 7): **18.7 min** (stage 1 326 s,
+  stage 2 678 s = 214-232 s/step, decode ~100 s), before this change (stage 1 still sync). Motion check: median frame change 14.0, 0/117 frames
+  > 38, vs FLASH 17.5 and 14/64 smeared; audio present. The README's swordsman-bridge GIF is the REFERENCE render (5.0 s), not FLASH.

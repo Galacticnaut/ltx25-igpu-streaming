@@ -209,8 +209,30 @@ for _u in dit_units:
     _b.ff.forward = _chunked(_b.ff.forward)
 
 RESUME_S1 = TWOSTAGE and os.environ.get("RESUME", "0") == "1" and os.path.exists(LAT + ".stage1")
-SYNC_S1 = os.environ.get("SYNC_S1", "0") == "1"   # large stage 1 (e.g. 1024x576): synchronous layer streaming frees ~3 GB of RAM for activations
-ds = make_ds(0 if (RESUME_S1 or SYNC_S1) else STEPS)
+_F_LAT = (FRAMES - 1) // 8 + 1
+
+
+def use_sync(env, stage, tokens, legacy_sync):
+    """Synchronous streaming frees ~3 GB of prefetch buffers for activations but leaves the GPU idle during every block read.
+    env SYNC_S1 / SYNC_S2: "1" = sync, "0" = prefetch, unset = auto. Auto on CUDA/XPU keeps the original fixed rules (tuned on a
+    15.6 GB iGPU laptop); on MPS (unified memory) it prefetches when free RAM covers the buffers + this stage's activations + a margin."""
+    v = os.environ.get(env)
+    if v in ("0", "1"):
+        sync, why = v == "1", f"{env}={v}"
+    elif DEVNAME != "mps":
+        sync, why = legacy_sync, "fixed rule"
+    else:
+        import psutil
+        free = psutil.virtual_memory().available / 2**30
+        need = 3.0 + 2.5 + 0.2 * tokens / 1000 + 4.0      # prefetch slots + base + activations (measured ~0.2 GiB/1k tokens) + margin
+        sync, why = free < need, f"free RAM {free:.1f} GiB vs ~{need:.1f} GiB needed"
+    log(f"{stage}: {'synchronous' if sync else 'prefetch'} streaming ({tokens} tokens; {why})")
+    return sync
+
+
+_n1 = (W // 32) * (H // 32) * _F_LAT
+SYNC_S1 = RESUME_S1 or use_sync("SYNC_S1", "C", _n1, W * H * FRAMES > 900 * 448 * 65)   # big stage 1 (e.g. 1024x576) needed sync on the iGPU
+ds = make_ds(0 if SYNC_S1 else STEPS)
 n = ds.load_resident()
 for name, p in dit.named_parameters():  # params absent from the checkpoint (unused keyframe embedding)
     if p.device.type == "meta" and not name.startswith("transformer_blocks."):
@@ -282,8 +304,8 @@ with torch.no_grad():
         log(f"C: upsampled to {tuple(up_lat.shape)}")
         del ups, up_pipe, video_lat
         ds.close()
-        ds = make_ds(0)
         cleanup()
+        ds = make_ds(0 if use_sync("SYNC_S2", "C2", _n1 * 4, True) else len(S2_SIGMAS))   # iGPU: always sync (B14)
         _stage.update(tag="C2", n=len(S2_SIGMAS), h=H // 16, w=W // 16)
         t2 = time.perf_counter()
         step_t.clear(); t = t2
