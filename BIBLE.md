@@ -313,7 +313,7 @@ The user judged the 20 s partial film bad because **the girl looked Ghibli-soft 
 
 ---------------------------------------------------------------------------------------------------------------------------------
 
-## 13. Timeline (for orientation)
+## 13. Timeline (for orientation; Mac port 2026-10-09/10: see section 15)
 2026-10-04: concept discussion (can an iGPU train/run big models?); hardware benchmarks; streaming prototype on a fake model; model access/download (2 h 51 m).
 2026-10-05: engine built; bugs B03–B16; first correct prompt-following clip; distilled recipe discovery; two-stage; HD showcase (4 s 1280×704, 20.6 min); anime tests; power-plan A/B; custom-kernel attempts; FLASH/TURBO modes (47 → 14 min); decode hang fix.
 2026-10-06: project reorganized; `render.py`; ronin-entrance; **audio bug found and fixed (B19)**; dialogue + ASR; image-to-video; realistic-vs-FLASH comparison; Lantern Keeper shots 1–4 (B20, B24); this document.
@@ -354,3 +354,52 @@ At 800x448 the video VAE cannot hold hundreds of 4-6 px figures (VAE round trip 
 
 ### 14g. Ye Chen ep1 v2 session (2026-10-08/09) - what is new
 Full story rebuilt as a 31-beat sheet (episodes/ye-chen-ep1/beat_sheet_v2.md), 18 new shots rendered with 2-3 takes each at 2-step refinement (free compute), 29-clip first draft (2:15). New tooling: shot_qc.py zoom detector (camera/face lean-in 1.0-1.4 ok, >=1.5 morph; the check also false-flags big head turns), speech-onset window 0.7-1.8 s, face-strip contact sheets per take; episode_run_v2.py (N takes per shot, no auto-pick, waits for AC); assemble_draft.py; stitch.py gains trim_end_s, audio_delay_s, gain, frame_fn. Lessons: (1) reused clips carry their own speech (transcribe the assembly; repeated phrases = bug), (2) take-to-take variance is large (eye colour, zoom, speech onset): render 2-3 takes of every hero/dialogue shot and choose by looking, (3) "turn their heads" prompt made whole crowds turn their backs (use a locked camera and say faces stay visible), (4) models add details not in the start image (cup handle appeared in one take). Saved state: episodes/ye-chen-ep1-v2/STATE.md.
+
+---------------------------------------------------------------------------------------------------------------------------------
+
+## 15. Mac port: Apple Silicon / MPS (2026-10-09/10)
+
+Branch `mac-port` (fork Galacticnaut/ltx25-igpu-streaming). Machine: 14" MacBook Pro `Mac16,6`, **M4 Max, 64 GB unified memory**, macOS 27, 87 W charger.
+Python 3.12 venv (Homebrew's 3.14 skipped: torch wheel availability), torch 2.14.1, same diffusers/transformers pins.
+
+**What changed (Windows behaviour unchanged; Windows paths compile-checked only, not re-run):**
+- `stream/dev.py`: device order cuda -> xpu -> mps (`LTX_DEVICE` overrides). On MPS `acc` is a shim (synchronize, empty_cache,
+  memory_allocated, mem_get_info, no-op Stream/stream) and `HAS_STREAMS=False`. RoPE patch: see B27.
+- `stream/blockstream.py`: POSIX reads = libc `pread` straight into the pinned buffer, `F_NOCACHE` on macOS (`LTX_NOCACHE=0` lets the OS cache);
+  `_close_raw` replaces `k32.CloseHandle` (also in `runtime.py`). Without side streams the loader thread only reads; `next()` does the GPU copy (B28).
+- `plat.py` (new): venv_python, free_ram_gb (psutil), power (`pmset -g batt`), open_path, POPEN_KW, kill_tree; used by render, studio, story*,
+  shot_run, episode_run*. `setup_ltx.py`: macOS preflight (arm64), /Volumes drive list, free space via nearest existing parent, `--device mps`
+  (default on macOS, plain PyPI torch), psutil dep. `selftest.py` knows mps. `studio.py`: per-platform cost model (`COST`).
+- Not ported: `friend_probe.py` (Windows hardware report), `stream/streamer.py` (prototype), Intel-specific `bench/` scripts.
+
+**Verification (all on the M4 Max; scripts in `bench/`):**
+- Random weights, default configs (`mps_probe.py`, `mps_probe_decode.py`, `mps_probe_text.py`): every component runs on MPS with no CPU fallback;
+  bf16 vs CPU fp32 0.75 % (2 transformer blocks), 1.1-1.5 % (VAE, upsampler), 0.8 % (connectors). Gemma's random-weight drift (41 % after 6 layers)
+  is identical on CPU bf16, i.e. bf16 + random weights, not MPS.
+- Loader: `loader_synthetic.py` (fake 2-shard checkpoint: unaligned offsets, F32/F16, transposed repack, prefetch + sync paths) and
+  `selftest.py loader` on the real shards (168/168 tensors) are byte-identical.
+- `mps_drift_real.py`: real transformer through the engine path vs a CPU fp32 block-by-block replay (a fp32 22B copy does not fit in RAM):
+  after 48 blocks video 4.1 %, audio 1.3 %; worst single block 0.9 %; all finite. Error peaks ~10 % near block 43 and shrinks again.
+- `mps_decode_real.py`: audio VAE + vocoder fp32 on MPS = CPU fp32 within 0.2 %; video VAE tiled FLASH decode finite.
+- Renders: smoke (384x256, 1.4 s) 0.8 min; FLASH (swordsman-bridge, seed 7) 6.4 and 6.7 min, prompt-following picture + audio (not yet user-verified).
+
+**Measured (FLASH 5.4 s, 1536x896):** text+connectors 10 s · stage 1 164-181 s (20.5-22.6 s/step) · upsample 3 s · stage 2 124-129 s · decode 61-74 s.
+Single streamed pass at 3k tokens: 9.2 s early in the session (34.6 GiB read, 0.3 s I/O wait: prefetch fully hides the disk), ~21 s later.
+Smoke steps 4.4 s = I/O floor (35 GB per pass at ~8 GB/s). Pinned RAM->GPU copy ~200 GB/s (unified memory).
+
+**Performance investigation (unresolved, do not re-run blindly):** bf16 matmul bursts at ~15 TFLOPS for ~0.5 s, then the clock falls smoothly to
+2.6-7 TFLOPS sustained, in ~1-minute waves; recovers after ~3 s idle. Ruled out, with measurements: memory pressure (freed 23 GB by quitting
+Docker Desktop's 31 GiB VM: no change), GPU contention (idle utilization 4-5 %), the attention mask (padded vs all-ones equal), a runaway
+`Siri AI` process (100 % CPU for 2 days, 20 GB; restarted: no change), High Power mode (`powermode 2`: no change), heat soak (thermalState
+"nominal": same curve). Remaining suspects: power delivery (87 W charger on a Max that ships with 96 W+; battery at 80 % "not charging") or a
+firmware GPU power limit. Next step: `sudo powermetrics --samplers gpu_power,thermal` in Terminal.app under load (it needs a real tty; the
+`!` prefix in Claude Code cannot prompt for the password).
+
+### B27-B31 (2026-10-09/10) Mac port bugs and gotchas
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| B27 | `Cannot convert a MPS Tensor to float64` in the transformer and the text connectors | `rope_double_precision=True` (checkpoint config); MPS has no float64 | `dev.py` runs `LTX2AudioVideoRotaryPosEmbed` / `LTX2RotaryPosEmbed1d` forwards on the CPU and moves the float32 cos/sin to MPS. float64 is only used for one `pow()` then cast, so this is bit-identical (max diff 0.0); plain float32 RoPE would differ by ~5e-3 |
+| B28 | (design) no `torch.mps.Stream` | MPS has one command queue per process and is not safe to drive from a second thread | loader thread reads disk only; GPU copy in `BlockStreamer.next()` on the main thread. Disk is still fully overlapped |
+| B29 | probe VAE gave 992x1728 instead of 896x1536 and a 7x12 latent for 448x768 (also on CPU) | default `AutoencoderKLLTX2Video()` config leaves the compression ratios unset, tiling then scales tiles wrongly | pass `spatial_compression_ratio=32, temporal_compression_ratio=8` in probes; the real checkpoint config sets them |
+| B30 | first smoke render: `PyAV is required to use encode_video` at decode | venv built by hand without setup's dependency list | install the full `FREE` list (`setup_ltx.py` does this itself) |
+| B31 | Hugging Face token "not found" though exported | token was in `HUGGING_FACE_TOKEN`; huggingface_hub only reads `HF_TOKEN`. Also: listing files worked but downloads 403'd until the license was accepted for that account | `HF_TOKEN="$HUGGING_FACE_TOKEN"`; accept the license on the model page first (cf. B02) |

@@ -38,18 +38,24 @@ def frames_for(seconds, fps):
     return max(9, int(round(seconds * fps / 8)) * 8 + 1)
 
 
-def step_seconds(n_tokens):                          # measured cost model on this iGPU (N in thousands of tokens)
+# Measured cost models (N in thousands of tokens). iGPU: Core Ultra 5 125H. Mac: 14" M4 Max (MPS) on an 87 W charger, whose
+# sustained GPU speed varies 2.6-7 TFLOPS; fitted to FLASH stage 1 (3.0k tok, ~21.5 s), stage 2 (12.1k, ~126 s), smoke (I/O floor).
+COST = dict(mac=dict(lin=5.8, quad=0.428, floor=4.5, text=15.0, up=5.0, dec=55.0, dec0=15.0),
+            igpu=dict(lin=14.5, quad=0.428, floor=20.0, text=35.0, up=40.0, dec=150.0, dec0=20.0))["mac" if plat.MAC else "igpu"]
+
+
+def step_seconds(n_tokens):
     n = n_tokens / 1000.0
-    return max(20.0, 14.5 * n + 0.428 * n * n)
+    return max(COST["floor"], COST["lin"] * n + COST["quad"] * n * n)
 
 
 def estimate(w, h, seconds, fps, s1_steps, s2_steps):
     F = (frames_for(seconds, fps) - 1) // 8 + 1
     n1 = (w // 32) * (h // 32) * F
-    e = dict(text=35.0, s1_n=s1_steps, s1=step_seconds(n1), up=40.0 if s2_steps else 0.0, s2_n=s2_steps)
+    e = dict(text=COST["text"], s1_n=s1_steps, s1=step_seconds(n1), up=COST["up"] if s2_steps else 0.0, s2_n=s2_steps)
     e["s2"] = step_seconds(n1 * 4) * 0.95 if s2_steps else 0.0
     fw, fh = (w * 2, h * 2) if s2_steps else (w, h)
-    e["dec"] = 150.0 * (fw * fh * frames_for(seconds, fps)) / (1536 * 896 * 65) + 20.0
+    e["dec"] = COST["dec"] * (fw * fh * frames_for(seconds, fps)) / (1536 * 896 * 65) + COST["dec0"]
     e["total"] = e["text"] + s1_steps * e["s1"] + e["up"] + s2_steps * e["s2"] + e["dec"]
     return e
 

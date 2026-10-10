@@ -39,6 +39,7 @@ The model is ~66 GB on disk; this project streams its weights from NVMe **layer 
 - Anime clips are generated at 12 fps and each frame shown twice ("on twos"); realistic footage needs 24 fps and takes about twice as long.
 - Faces smaller than ~25 % of the frame height smear at the 800x448 working size.
 - The same code has a CUDA path (`stream/dev.py`) that is **untested** on NVIDIA hardware.
+- The Apple Silicon (MPS) path is tested on one Mac only (below); the Windows code after the port is compile-checked, not re-run.
 - Speed estimates for other GPUs in my notes are estimates, not measurements.
 
 ## Run it
@@ -48,10 +49,26 @@ python render.py --mode flash --name my-clip --prompt-file prompts/anime_swordsm
 python render.py --mode flash --name my-clip --prompt-file my.txt --image start_frame.png   # image-to-video
 python studio.py           # tiny Tk UI (~50 MB RAM) with a live denoising preview
 ```
-Needs Windows, ~75 GB of free disk (fast NVMe strongly recommended), and 15+ GB of RAM.
+Needs Windows (Intel Arc / Core Ultra iGPU, or NVIDIA) or an Apple Silicon Mac, ~75 GB of free disk (fast NVMe strongly recommended), and 15+ GB of RAM.
+On macOS use Python 3.10-3.12 and `.venv/bin/python` in place of `python` after setup; the device is picked automatically (`LTX_DEVICE=mps|xpu|cuda` overrides).
+
+## Apple Silicon (MPS)
+The same streaming engine runs on Macs through PyTorch's MPS backend (no CUDA, no XPU). Measured on a **14" MacBook Pro, M4 Max, 64 GB**:
+
+| Result | Mac (M4 Max) | iGPU (above) |
+|---|---|---|
+| FLASH: anime 5.4 s, 1536x896 + audio | **6.4-6.7 min** | ~14 min |
+| Smoke test, 384x256, 1.4 s | 0.8 min | - |
+| One transformer pass, 3k tokens | 9.2 s (cool) - ~21 s (sustained) | ~47 s |
+
+- **Sustained GPU speed varies a lot on this machine:** bf16 matmuls burst at ~15 TFLOPS, then settle at 2.6-7 TFLOPS under minutes of load (87 W charger,
+  High Power mode made no difference). A cooler Mac or a 96 W+ charger may be faster; the cause was not pinned down (needs `sudo powermetrics`).
+- Port details: MPS has no float64, so LTX-2 RoPE tables are computed on the CPU (bit-identical); weights are read with `pread` + `F_NOCACHE`;
+  MPS has no side streams, so the prefetch thread only reads and the GPU copy happens on the main thread. See [BIBLE.md](BIBLE.md) section 15.
+- Checks: 48 real blocks on MPS bf16 vs a CPU fp32 replay end within 4.1 % (video) / 1.3 % (audio); loader byte-identical; audio VAE + vocoder in fp32 match CPU.
 
 ## Layout
-`stream/` the engine (streaming, run pipeline, decode, QC helpers) · `render.py` one-command renderer · `studio.py` UI · `episodes/` an end-to-end anime-episode workflow (shot cards, QC, assembly) · `BIBLE.md` architecture, 26 numbered bugs, benchmarks, porting checklist · `bench/` micro-benchmarks.
+`stream/` the engine (streaming, run pipeline, decode, QC helpers) · `plat.py` Windows/macOS helpers · `render.py` one-command renderer · `studio.py` UI · `episodes/` an end-to-end anime-episode workflow (shot cards, QC, assembly) · `BIBLE.md` architecture, 26 numbered bugs, benchmarks, porting checklist · `bench/` micro-benchmarks.
 
 ## Model and license
 Model weights are **not** included. Download them from [Lightricks/LTX-2.5-Diffusers](https://huggingface.co/Lightricks/LTX-2.5-Diffusers) after accepting the LTX-2 community license; the model card states commercial use is free below $10M annual revenue. The code in this repository is MIT licensed.
